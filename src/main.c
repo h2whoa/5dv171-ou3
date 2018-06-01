@@ -1,148 +1,160 @@
-#define _GNU_SOURCE
+#include <stdint.h>
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include <getopt.h>
 #include <pthread.h>
-#include <time.h>
 
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <fcntl.h>
-#include <unistd.h>
+#include "tests.h"
+#include "thread.h"
 
-#define NUM_THREADS 5
+/* 1 to 128 threads */
+#define MAX_THREADS (1 << 7)
+#define MIN_THREADS (1 << 0)
 
-/* Test information structure. */
-struct worker_args
-{
-	char * path;
-	int len;
-};
+/* 16 to 67108864 bytes per block */
+#define MAX_SIZE (1 << 26)
+#define MIN_SIZE (1 << 4)
 
-/*
- * worker_seqread()
- * Sequential read worker function, meant to put heavy load on I/O schedulers
- * that expect quick and easy I/O requests, like the Noop scheduler.
- */
-void * worker_seqread(void * input)
-{
-	struct worker_args * args = input;
-
-	char * dataBuf = malloc(args->len);
-	if(!dataBuf)
-	{
-		/* Somehow we didn't get enough memory for the buffer, abort! */
-		printf("Error: Unable to allocate memory buffer, aborting!\n");
-		return NULL;
-	}
-
-	/* Now open the file in read-only mode. If it breaks, PRAY FOR MOJO.
-	 * Unfortunately, this does not work for some reason and I have yet
-	 * to figure out why. Late-night coding, not even once. */
-
-	int fd = open(args->path, O_RDONLY | O_DIRECT);
-	if(fd < 0)
-	{
-		printf("Error: Unable to open %s in read-only mode, aborting!\n", args->path);
-		return NULL;
-	}
-
-	/* Start measuring the time with a timer. */
-
-	long bytesTotal = 0;
-
-	struct timespec ts, te;
-	clock_gettime(CLOCK_REALTIME, &ts);
-
-	/* Now, start reading from start to finish, abort if something comes up. */
-
-	int rdBytes;
-	while((rdBytes = read(fd, dataBuf, args->len)) != 0)
-	{
-		bytesTotal += rdBytes;
-	}
-
-	close(fd);
-	free(dataBuf);
-
-	/* We're done, wrap it up and calculate how long it took. */
-
-	clock_gettime(CLOCK_REALTIME, &te);
-	long tTotal = 0;
-
-	/* Adjust the time accordingly because POSIX timers are a PITA
-	   and will loop the nanosecond counter every second. */
-	if((te.tv_nsec - ts.tv_nsec) < 0)
-	{
-		tTotal = 1E9 + (te.tv_nsec - ts.tv_nsec);
-	}
-	else
-	{
-		tTotal = te.tv_nsec - ts.tv_nsec;
-	}
-
-	tTotal += ((te.tv_sec - ts.tv_sec) * 1000);
-	tTotal /= 1E6;
-
-	printf("Finished execution in %d milliseconds.\n", tTotal);
-	return NULL;
-}
-
-/*
- * worker_rndread()
- * Supposed to be practically the same as worker_seqread() but with
- * random-access reading instead to really shake up I/O schedulers
- * that don't really expect it, like the CFQ scheduler for example.
- */
-void * worker_rndread()
-{
-	return NULL;
-}
+/* 1 to 1048576 blocks */
+#define MAX_COUNT (1 << 20)
+#define MIN_COUNT (1 << 0)
 
 int main(int argc, char * argv[])
 {
-	printf("iotest 0.01\nWritten by Robin Andersson. (c13ras)\n");
+	printf("iotest 0.02\nWritten by Robin Andersson. (c13ras)\n");
 
-	/* Only start if we have exactly 1 argument; the test file path. */
+	/* Option variables for safe keeping of default parameters. */
 
-	if(argc != 2)
+	uint32_t opt_thread_count			= MIN_THREADS;
+
+	void *(*opt_test_function)(void *)	= test_seq;
+
+	uint32_t opt_block_size				= MIN_SIZE;
+	uint32_t opt_block_count			= MIN_COUNT;
+
+	char * opt_path						= NULL;
+
+	/* Scan the argument list for any options and filter them out
+	 * with getopt(), then grab the input path if it exists. */
+
+	int32_t opt;
+	while((opt = getopt(argc, argv, "n:t:b:B:")) != -1)
 	{
-		printf("USAGE: iotest <input file>\n\n");
-		return 0;
+		switch(opt)
+		{
+			case 'n':
+				/* Number of threads. */
+				opt_thread_count = atoi(optarg);
+
+				opt_thread_count = (opt_thread_count > MAX_THREADS) ? MAX_THREADS : opt_thread_count;
+				opt_thread_count = (opt_thread_count < MIN_THREADS) ? MIN_THREADS : opt_thread_count;
+
+				break;
+
+			case 't':
+				/* Test method. */
+				if(!strcmp("seq", optarg))
+				{
+					opt_test_function = test_seq;
+				}
+				else if(!strcmp("rand", optarg))
+				{
+					srand(time(NULL));
+					opt_test_function = test_rand;
+				}
+				else
+				{
+					fprintf(stderr, "invalid test\n");
+					return EXIT_FAILURE;
+				}
+
+				break;
+
+			case 'b':
+				/* Block size. */
+				opt_block_size = atoi(optarg);
+
+				opt_block_size = (opt_block_size > MAX_SIZE) ? MAX_SIZE : opt_block_size;
+				opt_block_size = (opt_block_size < MIN_SIZE) ? MIN_SIZE : opt_block_size;
+
+				break;
+
+			case 'B':
+				/* Block count. */
+				opt_block_count = atoi(optarg);
+
+				opt_block_count = (opt_block_count > MAX_COUNT) ? MAX_COUNT : opt_block_count;
+				opt_block_count = (opt_block_count < MIN_COUNT) ? MIN_COUNT : opt_block_count;
+
+				break;
+
+			default:
+				printf("\nUSAGE: iotest [-n threads] [-t seq/rand] [-b block size] [-B block count] input\n\n");
+				return EXIT_SUCCESS;
+		}
 	}
 
-	/* Launch the sequential tests, pretty ugly way of doing it though. */
+	/* Copy the path to heap memory if it exists.
+	 * Otherwise, complain like there's no tomorrow. */
 
-	pthread_t tThreads[NUM_THREADS];
-	int testLen = 4096;
-
-	for(int i = 0; i < 5; i++)
+	if(optind >= argc)
 	{
-		printf("Beginning %d byte sequential read test: \n\n", testLen);
-
-		for(int t = 0; t < NUM_THREADS; t++)
-		{
-			/* Start the threads with the current buffer size. */
-			struct worker_args args;
-
-			args.path = argv[1];
-			args.len = testLen;
-
-			pthread_create(&tThreads[t], NULL, &worker_seqread, &args);
-		}
-
-		for(int t = 0; t < NUM_THREADS; t++)
-		{
-			/* Join the threads as soon as possible. */
-
-			pthread_join(tThreads[t], NULL);
-		}
-
-		testLen <<= 3;
+		fprintf(stderr, "missing test input file path\n");
+		return EXIT_FAILURE;
 	}
 
-	/* Begin random-access tests now that we're done with sequential tests. */
+	uint32_t opt_path_len = strlen(argv[optind]);
 
-	return 0;
+	opt_path = malloc(opt_path_len * sizeof(char));
+	if(!opt_path)
+	{
+		fprintf(stderr, "path buffer allocation failure\n");
+		return EXIT_FAILURE;
+	}
+
+	strncpy(opt_path, argv[optind], opt_path_len);
+
+	/* Allocate memory for the thread data structures. */
+
+	struct thread_info * threads = malloc(opt_thread_count * sizeof(struct thread_info));
+	if(!threads)
+	{
+		fprintf(stderr, "thread allocation failure\n");
+
+		free(opt_path);
+		return EXIT_FAILURE;
+	}
+
+	/* Prepare thread parameters and create the threads. */
+
+	for(int i = 0; i < opt_thread_count; i++)
+	{
+		threads[i].path = opt_path;
+
+		threads[i].block_size = opt_block_size;
+		threads[i].block_count = opt_block_count;
+
+		pthread_create(&threads[i].thread, NULL, opt_test_function, (void *)&threads[i]);
+	}
+
+	/* Now, join the threads in the same order.
+	 * This wont affect the test results since the results are generated in
+	 * the threads themselves, we just display them in a proper manner. */
+
+	for(int i = 0; i < opt_thread_count; i++)
+	{
+		pthread_join(threads[i].thread, NULL);
+
+		printf("%d %f\n", i, threads[i].t_total);
+	}
+
+	/* Clean up after finishing everything. */
+
+	free(opt_path);
+	free(threads);
+
+	return EXIT_SUCCESS;
 }
