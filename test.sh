@@ -1,6 +1,6 @@
 #!/bin/bash
 
-tmp_file="/tmp/test1G"
+tmp_file="/tmp/test2G"
 
 # drop_caches
 # Tells the kernel to drop all cache pages used for storing VFS-related data.

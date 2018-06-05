@@ -24,18 +24,16 @@
 
 int main(int argc, char * argv[])
 {
-	printf("iotest 0.02\nWritten by Robin Andersson. (c13ras)\n");
-
 	/* Option variables for safe keeping of default parameters. */
 
-	uint32_t opt_thread_count			= MIN_THREADS;
+	uint32_t opt_thread_count = MIN_THREADS;
 
-	void *(*opt_test_function)(void *)	= test_seq;
+	void *(*opt_test_function)(void *) = test_seq;
 
-	uint32_t opt_block_size				= MIN_SIZE;
-	uint32_t opt_block_count			= MIN_COUNT;
+	uint32_t opt_block_size	= MIN_SIZE;
+	uint32_t opt_block_count = MIN_COUNT;
 
-	char * opt_path						= NULL;
+	char * opt_path	= NULL;
 
 	/* Scan the argument list for any options and filter them out
 	 * with getopt(), then grab the input path if it exists. */
@@ -92,7 +90,8 @@ int main(int argc, char * argv[])
 				break;
 
 			default:
-				printf("\nUSAGE: iotest [-n threads] [-t seq/rand] [-b block size] [-B block count] input\n\n");
+				printf("iotest 0.02\nWritten by Robin Andersson. (c13ras)\n");
+				printf("USAGE: iotest [-n threads] [-t seq/rand] [-b block size] [-B block count] input\n\n");
 				return EXIT_SUCCESS;
 		}
 	}
